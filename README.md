@@ -1,4 +1,4 @@
-# Crypto Price Alert Discord Bot
+# Crypto Alerts Bot - discord.py & Kraken API
 
 A simple, self-hosted Discord bot for creating personal cryptocurrency price alerts. The bot monitors prices using the Kraken public API and sends a notification via a webhook when a target price is crossed.
 
