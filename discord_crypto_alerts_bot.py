@@ -1,10 +1,11 @@
 import discord
 import asyncio
-import json
-import requests
+import httpx
 import sys
 import dotenv
 import os
+from discord.ext import tasks
+import copy
 
 
 dotenv.load_dotenv()
@@ -42,9 +43,13 @@ INCORRECT_STRUCTURE_MESSAGE_EMOJI_REACTION = "❓"
 ADD_MESSAGE_DICT_STRING = "add"
 DELETE_MESSAGE_DICT_STRING = "del"
 
+PAIRS_GET_PARAMETER_DELIMITER = ","
+
 
 saved_channel_messages_by_pair_name = {}
+previous_pair_prices = {}
 
+data_lock = asyncio.Lock()
 
 bot_intents = discord.Intents.default()
 bot_intents.message_content = True
@@ -52,50 +57,8 @@ bot_intents.message_content = True
 discord_client = discord.Client(intents=bot_intents)
 
 
-def send_alert_message(pair_name, pair_price):
-    requests.post(WEBHOOK_URL, json={"content": f"<@{MY_USER_ID}> ! {pair_name} pair has crossed the price of {pair_price} !"})
-
-
-async def check_alerts(previous_pair_prices):
-    pairs_get_parameter = ""
-    if len(saved_channel_messages_by_pair_name) == 1:
-        pairs_get_parameter = list(saved_channel_messages_by_pair_name.keys())[0]
-    else:
-        for pair_name in saved_channel_messages_by_pair_name:
-            if pairs_get_parameter == "":
-                pairs_get_parameter = pair_name
-            else:
-                pairs_get_parameter += f",{pair_name}"
-
-    api_result_dict = json.loads(requests.get(f"{KRAKEN_API_PAIR_URL}{pairs_get_parameter}").content)[RESULT_KEY_DICT]
-
-    current_pair_prices_dict = {}
-
-    for pair_name in saved_channel_messages_by_pair_name:
-        if pair_name in api_result_dict:
-            current_pair_price = api_result_dict[pair_name][ASK_PRICE_KEY_DICT][ASK_PRICE_INDEX]
-        else:
-            api_result_dict_pair = json.loads(requests.get(f"{KRAKEN_API_PAIR_URL}{pair_name}").content)[RESULT_KEY_DICT]
-            current_pair_price = api_result_dict_pair[list(api_result_dict_pair.keys())[0]][ASK_PRICE_KEY_DICT][ASK_PRICE_INDEX]
-
-        current_pair_prices_dict[pair_name] = current_pair_price
-
-        if previous_pair_prices:
-            for message_id in saved_channel_messages_by_pair_name[pair_name]:
-                alert_price = saved_channel_messages_by_pair_name[pair_name][message_id]
-
-                previous_price_float = float(previous_pair_prices[pair_name])
-                current_price_float = float(current_pair_prices_dict[pair_name])
-                alert_price_float = float(alert_price)
-
-                if previous_price_float <= alert_price_float <= current_price_float or previous_price_float >= alert_price_float >= current_price_float:
-                    send_alert_message(pair_name, alert_price)
-
-                    alert_message = discord_client.get_channel(CRYPTO_ALERTS_MANAGER_CHANNEL_ID).fetch_message(message_id)
-                    await alert_message.delete()
-                    update_messages_by_pair_name_dict(alert_message, DELETE_MESSAGE_DICT_STRING)
-
-    return current_pair_prices_dict
+async def send_alert_message(pair_name, pair_price):
+    await http_client.post(WEBHOOK_URL, json={"content": f"<@{MY_USER_ID}> ! {pair_name} pair has crossed the price of {pair_price} !"})
 
 
 def is_pair_name_correct(pair_name):
@@ -123,45 +86,91 @@ def is_message_structure_correct(message_content):
 async def messages_by_pair_name_dict_init():
     async for message in discord_client.get_channel(CRYPTO_ALERTS_MANAGER_CHANNEL_ID).history(oldest_first=True, limit=None):
         if is_message_structure_correct(message.content):
-            update_messages_by_pair_name_dict(message, ADD_MESSAGE_DICT_STRING)
+            await update_messages_by_pair_name_dict(message, ADD_MESSAGE_DICT_STRING)
 
 
-def update_messages_by_pair_name_dict(message, action):
+async def update_messages_by_pair_name_dict(message, action):
     message_split = message.content.split(MESSAGE_DELIMITER)
 
-    if action == ADD_MESSAGE_DICT_STRING:
-        if message_split[PAIR_PART_MESSAGE_INDEX] in saved_channel_messages_by_pair_name:
-            saved_channel_messages_by_pair_name[message_split[PAIR_PART_MESSAGE_INDEX]][message.id] = message_split[PRICE_PART_MESSAGE_INDEX]
-        else:
-            saved_channel_messages_by_pair_name[message_split[PAIR_PART_MESSAGE_INDEX]] = {message.id: message_split[PRICE_PART_MESSAGE_INDEX]}
+    async with data_lock:
+        if action == ADD_MESSAGE_DICT_STRING:
+            if message_split[PAIR_PART_MESSAGE_INDEX] in saved_channel_messages_by_pair_name:
+                saved_channel_messages_by_pair_name[message_split[PAIR_PART_MESSAGE_INDEX]][message.id] = message_split[PRICE_PART_MESSAGE_INDEX]
+            else:
+                saved_channel_messages_by_pair_name[message_split[PAIR_PART_MESSAGE_INDEX]] = {message.id: message_split[PRICE_PART_MESSAGE_INDEX]}
+        
+        elif action == DELETE_MESSAGE_DICT_STRING and message.id in saved_channel_messages_by_pair_name[message_split[PAIR_PART_MESSAGE_INDEX]]:  # The message may be a message that is not saved in the dict (if it has been modified, for example).
+            if len(saved_channel_messages_by_pair_name[message_split[PAIR_PART_MESSAGE_INDEX]]) == 1:
+                del saved_channel_messages_by_pair_name[message_split[PAIR_PART_MESSAGE_INDEX]]
+            else:
+                del saved_channel_messages_by_pair_name[message_split[PAIR_PART_MESSAGE_INDEX]][message.id]
 
-    elif action == DELETE_MESSAGE_DICT_STRING and message.id in saved_channel_messages_by_pair_name[message_split[PAIR_PART_MESSAGE_INDEX]]:
-        if len(saved_channel_messages_by_pair_name[message_split[PAIR_PART_MESSAGE_INDEX]]) == 1:
-            del saved_channel_messages_by_pair_name[message_split[PAIR_PART_MESSAGE_INDEX]]
-        else:
-            del saved_channel_messages_by_pair_name[message_split[PAIR_PART_MESSAGE_INDEX]][message.id]
+
+@tasks.loop(seconds=MINUTES_REFRESH_DELAY * 60)
+async def check_alerts_task():
+    global previous_pair_prices
+
+    try:
+        async with data_lock:
+            saved_channel_messages_dict_copy = copy.deepcopy(saved_channel_messages_by_pair_name)
+            
+        pairs_to_check = saved_channel_messages_dict_copy.keys()
+        if not pairs_to_check:
+            return {}
+        pairs_get_parameter = PAIRS_GET_PARAMETER_DELIMITER.join(pairs_to_check)
+        
+        api_response = await http_client.get(f"{KRAKEN_API_PAIR_URL}{pairs_get_parameter}")
+        api_result_dict = api_response.json()[RESULT_KEY_DICT]
+
+        current_pair_prices_dict = {}
+
+        for pair_name in saved_channel_messages_dict_copy:
+            if pair_name in api_result_dict:
+                current_pair_price = api_result_dict[pair_name][ASK_PRICE_KEY_DICT][ASK_PRICE_INDEX]
+            else:
+                api_response_pair = await http_client.get(f"{KRAKEN_API_PAIR_URL}{pair_name}")
+                api_result_dict_pair = api_response_pair.json()[RESULT_KEY_DICT]
+                current_pair_price = api_result_dict_pair[list(api_result_dict_pair.keys())[0]][ASK_PRICE_KEY_DICT][ASK_PRICE_INDEX]
+
+            current_pair_prices_dict[pair_name] = current_pair_price
+
+            if pair_name in previous_pair_prices:
+                for message_id in saved_channel_messages_dict_copy[pair_name]:
+                    alert_price = saved_channel_messages_dict_copy[pair_name][message_id]
+
+                    previous_price_float = float(previous_pair_prices[pair_name])
+                    current_price_float = float(current_pair_prices_dict[pair_name])
+                    alert_price_float = float(alert_price)
+
+                    if previous_price_float <= alert_price_float <= current_price_float or previous_price_float >= alert_price_float >= current_price_float:
+                        await send_alert_message(pair_name, alert_price)
+
+                        alert_message = await discord_client.get_channel(CRYPTO_ALERTS_MANAGER_CHANNEL_ID).fetch_message(message_id)
+                        await alert_message.delete()
+                        await update_messages_by_pair_name_dict(alert_message, DELETE_MESSAGE_DICT_STRING)
+
+        previous_pair_prices = current_pair_prices_dict
+
+    except Exception as e:
+        await http_client.post(WEBHOOK_URL, json={"content": f"⚠️ <@{MY_USER_ID}>\nAn error has occured : \"{e}\"\nThe bot has been disconnected."})
+        sys.exit()
 
 
 @discord_client.event
 async def on_ready():
+    global http_client
+
+    http_client = httpx.AsyncClient()
+
     await messages_by_pair_name_dict_init()
-    previous_pair_prices = {}
-
-    while True:
-        try:
-            previous_pair_prices = await check_alerts(previous_pair_prices)
-            print(saved_channel_messages_by_pair_name)
-        except ZeroDivisionError as e:
-            requests.post(WEBHOOK_URL, json={"content": f"⚠️ <@{MY_USER_ID}>\nAn error has occured : \"{e}\"\nThe bot has been disconnected."})
-            sys.exit()
-
-        await asyncio.sleep(MINUTES_REFRESH_DELAY * 60)
+    
+    check_alerts_task.start()
 
 
 @discord_client.event
 async def on_message(message):
     if is_message_structure_correct(message.content):
-        update_messages_by_pair_name_dict(message, ADD_MESSAGE_DICT_STRING)
+        await update_messages_by_pair_name_dict(message, ADD_MESSAGE_DICT_STRING)
         await message.add_reaction(CORRECT_STRUCTURE_MESSAGE_EMOJI_REACTION)
     else:
         await message.add_reaction(INCORRECT_STRUCTURE_MESSAGE_EMOJI_REACTION)
@@ -169,17 +178,13 @@ async def on_message(message):
 
 @discord_client.event
 async def on_message_delete(message):
-    update_messages_by_pair_name_dict(message, DELETE_MESSAGE_DICT_STRING)
+    await update_messages_by_pair_name_dict(message, DELETE_MESSAGE_DICT_STRING)
 
 
 @discord_client.event
 async def on_message_edit(message_before, message_after):
-    update_messages_by_pair_name_dict(message_before, DELETE_MESSAGE_DICT_STRING)
-
-    for reaction in message_after.reactions:
-        if reaction.emoji == CORRECT_STRUCTURE_MESSAGE_EMOJI_REACTION and reaction.me:
-            await reaction.remove(discord_client.user)
-    await message_after.add_reaction(INCORRECT_STRUCTURE_MESSAGE_EMOJI_REACTION)
+    await update_messages_by_pair_name_dict(message_before, DELETE_MESSAGE_DICT_STRING)
+    await message_after.delete()
 
 
 discord_client.run(BOT_TOKEN)
