@@ -33,7 +33,7 @@ RESULT_KEY_DICT = "result"
 ASK_PRICE_KEY_DICT = "a"
 ASK_PRICE_INDEX = 0
 
-MINUTES_REFRESH_DELAY = 1
+SECONDS_REFRESH_DELAY = 30
 
 CORRECT_STRUCTURE_MESSAGE_EMOJI_REACTION = "✅"
 INCORRECT_STRUCTURE_MESSAGE_EMOJI_REACTION = "❓"
@@ -104,7 +104,7 @@ async def update_messages_by_pair_name_dict(message, action):
                 del saved_channel_messages_by_pair_name[message_split[PAIR_PART_MESSAGE_INDEX]][message.id]
 
 
-@tasks.loop(seconds=MINUTES_REFRESH_DELAY * 60)
+@tasks.loop(seconds=SECONDS_REFRESH_DELAY)
 async def check_alerts_task():
     global previous_pair_prices
 
@@ -145,7 +145,6 @@ async def check_alerts_task():
 
                         alert_message = await discord_client.get_channel(CRYPTO_ALERTS_MANAGER_CHANNEL_ID).fetch_message(message_id)
                         await alert_message.delete()
-                        await update_messages_by_pair_name_dict(alert_message, DELETE_MESSAGE_DICT_STRING)
 
         previous_pair_prices = current_pair_prices_dict
 
@@ -167,6 +166,9 @@ async def on_ready():
 
 @discord_client.event
 async def on_message(message):
+    if message.channel.id != CRYPTO_ALERTS_MANAGER_CHANNEL_ID:
+        return
+
     if is_message_structure_correct(message.content):
         await update_messages_by_pair_name_dict(message, ADD_MESSAGE_DICT_STRING)
         await message.add_reaction(CORRECT_STRUCTURE_MESSAGE_EMOJI_REACTION)
@@ -176,11 +178,17 @@ async def on_message(message):
 
 @discord_client.event
 async def on_message_delete(message):
+    if message.channel.id != CRYPTO_ALERTS_MANAGER_CHANNEL_ID:
+        return
+
     await update_messages_by_pair_name_dict(message, DELETE_MESSAGE_DICT_STRING)
 
 
 @discord_client.event
 async def on_message_edit(message_before, message_after):
+    if message_before.channel.id != CRYPTO_ALERTS_MANAGER_CHANNEL_ID:
+        return
+
     await update_messages_by_pair_name_dict(message_before, DELETE_MESSAGE_DICT_STRING)
     await message_after.delete()
 
