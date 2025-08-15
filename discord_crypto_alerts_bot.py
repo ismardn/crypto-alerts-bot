@@ -10,17 +10,15 @@ import copy
 
 dotenv.load_dotenv()
 
-
 # ------------------------------- Environment variables ------------------------------- #
-CRYPTO_ALERTS_MANAGER_CHANNEL_ID = int(os.getenv("CRYPTO_ALERTS_MANAGER_CHANNEL_ID"))
-
-MY_USER_ID = int(os.getenv("MY_USER_ID"))
-
 # Useful for reading and deleting messages in the "crypto channel"
 BOT_TOKEN = os.getenv("CRYPTO_ALERTS_BOT_TOKEN")
 
 # Useful for receiving notifications in a different channel (and avoiding giving additional permissions to the bot)
 WEBHOOK_URL = os.getenv("CRYPTO_ALERTS_WEBHOOK_URL")
+
+CRYPTO_ALERTS_MANAGER_CHANNEL_ID = int(os.getenv("CRYPTO_ALERTS_MANAGER_CHANNEL_ID"))
+MY_USER_ID = int(os.getenv("MY_USER_ID"))
 # ------------------------------------------------------------------------------------- #
 
 
