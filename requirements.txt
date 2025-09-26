@@ -1,3 +1,4 @@
-discord.py
+nextcord
 python-dotenv
 httpx
+websockets
