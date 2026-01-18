@@ -1,4 +1,2 @@
 .env
-
-cogs/__pycache__
-cogs/commands_cog.py
+crypto_alerts.db
