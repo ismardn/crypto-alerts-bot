@@ -41,8 +41,9 @@ WARNING_EMOJI = "⚠️"
 CROSS_UP_EMOJI = "📈"
 CROSS_DOWN_EMOJI = "📉"
 TRASH_EMOJI = "🗑️"
+CLOCK_EMOJI = "🕑"
 
-DASHBOARD_TITLE = "📡 ACTIVE MONITORING"
+DASHBOARD_TITLE = "📡  ACTIVE MONITORING"
 NO_ACTIVE_ALERTS_TEXT = "💤 No active alerts"
 ALERT_ALREADY_REMOVED_MESSAGE = "The alert has already been removed."
 
@@ -74,6 +75,8 @@ ACTIVE_ALERTS_CACHE_ALERT_ID_INDEX = 0
 INBOX_MESSAGE_HEADER = "[Crypto Alerts Bot]\n\n"
 
 SUBSCRIPT_MAP = {str(digit): "₀₁₂₃₄₅₆₇₈₉"[digit] for digit in range(10)}
+
+SYNC_STEP_MINUTES = 10
 
 
 logging.basicConfig(level=logging.INFO)
@@ -169,14 +172,20 @@ async def refresh_dashboard(chat_id: int):
         except Exception:  
             pass
     
+    current_datetime = datetime.datetime.now()
+    formatted_current_date = current_datetime.strftime("%d %b")
+    formatted_current_time = current_datetime.strftime("%H:%M")
+    dashboard_full_title = f"{CLOCK_EMOJI}  Updated on  <code>{formatted_current_date}</code>  at  <code>{formatted_current_time}</code>\n\n{DASHBOARD_TITLE}"
+
     is_dashboard_updated = False
     if chat_id in pinned_dashboard_ids:
         try:
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=pinned_dashboard_ids[chat_id],
-                text=DASHBOARD_TITLE,
-                reply_markup=alerts_menu_interface
+                text=dashboard_full_title,
+                reply_markup=alerts_menu_interface,
+                parse_mode="HTML"
             )
             is_dashboard_updated = True
         except Exception:
@@ -190,8 +199,9 @@ async def refresh_dashboard(chat_id: int):
 
         new_dashboard_message = await bot.send_message(
             chat_id=chat_id,
-            text=DASHBOARD_TITLE,
+            text=dashboard_full_title,
             reply_markup=alerts_menu_interface,
+            parse_mode="HTML"
         )
         
         pinned_dashboard_ids[chat_id] = new_dashboard_message.message_id
@@ -466,13 +476,36 @@ async def confirm_deletion_callback(callback: types.CallbackQuery):
     await refresh_dashboard(callback.message.chat.id)
 
 
+async def heartbeat_loop():
+    while True:
+        try:
+            current_time = datetime.datetime.now()
+            minutes_to_next_step = SYNC_STEP_MINUTES - (current_time.minute % SYNC_STEP_MINUTES)
+            seconds_to_sleep = (minutes_to_next_step * 60) - current_time.second - (current_time.microsecond / 1_000_000)
+            
+            await asyncio.sleep(max(seconds_to_sleep, 0) + 0.5)
+            # - The "max" function allows us to avoid a specific scenario here: the bot calculates that it should sleep until, for example, 16:10,
+            # while the system clock moves to 16:10:00.001, which means that "seconds_to_sleep" variable can have a negative value
+            # - "+ 0.5" ensures that we are at the next minute (and not at 16:39:59.999, for example)
+            
+            await refresh_dashboard(MY_USER_ID)
+
+        except Exception as e:
+            print(f"Error in heartbeat: {e}")
+            await asyncio.sleep(10)
+
+
 async def main():
     print("=== Bot started ===")
     
     await load_pairs_metadata_from_database()
 
+    await refresh_dashboard(MY_USER_ID)
+
     global websocket_task
     websocket_task = asyncio.create_task(run_websocket_listener())
+    
+    asyncio.create_task(heartbeat_loop())
 
     await bot.delete_webhook(drop_pending_updates=True)
     await message_dispatcher.start_polling(bot)
