@@ -42,10 +42,12 @@ CROSS_UP_EMOJI = "📈"
 CROSS_DOWN_EMOJI = "📉"
 TRASH_EMOJI = "🗑️"
 CLOCK_EMOJI = "🕑"
+ONLINE_EMOJI = "🟢"
+OFFLINE_EMOJI = "🔴"
 
-DASHBOARD_TITLE = "📡  ACTIVE MONITORING"
 NO_ACTIVE_ALERTS_TEXT = "💤 No active alerts"
 ALERT_ALREADY_REMOVED_MESSAGE = "The alert has already been removed."
+WEBSOCKET_STATUS_TEXT = "🔌  WebSocket Status:  "
 
 CONFIRM_TEXT_BUTTON = "✅ Confirm"
 CANCEL_TEXT_BUTTON = "❌ Cancel"
@@ -76,7 +78,7 @@ INBOX_MESSAGE_HEADER = "[Crypto Alerts Bot]\n\n"
 
 SUBSCRIPT_MAP = {str(digit): "₀₁₂₃₄₅₆₇₈₉"[digit] for digit in range(10)}
 
-SYNC_STEP_MINUTES = 10
+SYNC_STEP_MINUTES = 5
 
 
 logging.basicConfig(level=logging.INFO)
@@ -100,6 +102,8 @@ pinned_dashboard_ids = {}
 last_known_prices = {}
 pairs_metadata = {}
 active_alerts_cache = {}
+
+is_websocket_dead = False
 
 websocket_task = None
 
@@ -175,7 +179,10 @@ async def refresh_dashboard(chat_id: int):
     current_datetime = datetime.datetime.now()
     formatted_current_date = current_datetime.strftime("%d %b")
     formatted_current_time = current_datetime.strftime("%H:%M")
-    dashboard_full_title = f"{CLOCK_EMOJI}  Updated on  <code>{formatted_current_date}</code>  at  <code>{formatted_current_time}</code>\n\n{DASHBOARD_TITLE}"
+
+    status_emoji = OFFLINE_EMOJI if is_websocket_dead else ONLINE_EMOJI
+
+    dashboard_full_title = f"{CLOCK_EMOJI}  Updated on  <code>{formatted_current_date}</code>  at  <code>{formatted_current_time}</code>\n{WEBSOCKET_STATUS_TEXT}{status_emoji}\n\n<i>Updates automatically every {SYNC_STEP_MINUTES} minutes</i>"
 
     is_dashboard_updated = False
     if chat_id in pinned_dashboard_ids:
@@ -257,6 +264,8 @@ async def clean_pair_metadata_if_needed(base_currency: str, quote_currency: str)
 
 
 async def run_websocket_listener():
+    global is_websocket_dead
+
     while True:
         try:
             pairs_to_check = list(pairs_metadata.keys())
@@ -270,6 +279,8 @@ async def run_websocket_listener():
             
             async with websockets.connect(full_websocket_url, ping_interval=PING_SECONDS_DELAY, ping_timeout=PONG_SECONDS_TIMEOUT) as websocket:
                 async for pair_websocket_message in websocket:
+                    is_websocket_dead = False
+
                     json_data = json.loads(pair_websocket_message)
                     if "data" not in json_data: continue  # Binance can send messages that do not contain a "data" field
                     
@@ -324,6 +335,8 @@ async def run_websocket_listener():
             break
 
         except Exception:
+            is_websocket_dead = True
+
             await send_inbox_message(traceback.format_exc(), level="ERROR")
             await asyncio.sleep(1)
 
