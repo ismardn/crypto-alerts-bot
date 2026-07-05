@@ -98,7 +98,7 @@ database_cursor.execute(f"""
 """)
 database_connection.commit()
 
-pinned_dashboard_ids = {}
+dashboard_message_ids = {}
 last_known_prices = {}
 pairs_metadata = {}
 active_alerts_cache = {}
@@ -167,15 +167,6 @@ async def refresh_dashboard(chat_id: int):
 
     alerts_menu_interface = InlineKeyboardMarkup(inline_keyboard=dashboard_layout)
 
-    if chat_id not in pinned_dashboard_ids:  # We check whether the dashboard associated with the user is unknown (because we store pinned dashboards based on the chat ID)
-        try:
-            chat_info = await bot.get_chat(chat_id)
-            if chat_info.pinned_message:
-                if chat_info.pinned_message.from_user.id == bot.id:
-                    pinned_dashboard_ids[chat_id] = chat_info.pinned_message.message_id
-        except Exception:  
-            pass
-    
     current_datetime = datetime.datetime.now()
     formatted_current_date = current_datetime.strftime("%d %b")
     formatted_current_time = current_datetime.strftime("%H:%M")
@@ -185,11 +176,11 @@ async def refresh_dashboard(chat_id: int):
     dashboard_full_title = f"{CLOCK_EMOJI}  Updated on  <code>{formatted_current_date}</code>  at  <code>{formatted_current_time}</code>\n{WEBSOCKET_STATUS_TEXT}{status_emoji}\n\n<i>Updates automatically every {SYNC_STEP_MINUTES} minutes</i>"
 
     is_dashboard_updated = False
-    if chat_id in pinned_dashboard_ids:
+    if chat_id in dashboard_message_ids:
         try:
             await bot.edit_message_text(
                 chat_id=chat_id,
-                message_id=pinned_dashboard_ids[chat_id],
+                message_id=dashboard_message_ids[chat_id],
                 text=dashboard_full_title,
                 reply_markup=alerts_menu_interface,
                 parse_mode="HTML"
@@ -198,12 +189,7 @@ async def refresh_dashboard(chat_id: int):
         except Exception:
             pass
 
-    if not is_dashboard_updated:  # "is_dashboard_updated" can be False if the dashboard is no longer in the conversation but is still stored in "pinned_dashboard_ids"
-        try:
-            await bot.unpin_all_chat_messages(chat_id)
-        except:
-            pass
-
+    if not is_dashboard_updated:  # "is_dashboard_updated" can be False if the dashboard is no longer in the conversation but is still stored in "dashboard_message_ids"
         new_dashboard_message = await bot.send_message(
             chat_id=chat_id,
             text=dashboard_full_title,
@@ -211,11 +197,7 @@ async def refresh_dashboard(chat_id: int):
             parse_mode="HTML"
         )
         
-        pinned_dashboard_ids[chat_id] = new_dashboard_message.message_id
-        try:
-            await bot.pin_chat_message(chat_id, new_dashboard_message.message_id)
-        except:
-            pass
+        dashboard_message_ids[chat_id] = new_dashboard_message.message_id
 
 
 @message_dispatcher.callback_query(F.data == "none")  # Useful for the label button indicating that no alerts have been added, so that nothing happens if it is clicked
