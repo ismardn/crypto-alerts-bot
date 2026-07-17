@@ -1,4 +1,4 @@
-# Crypto Alerts Bot – aiogram & Binance WebSocket
+# Crypto Alerts Bot - aiogram & Binance WebSocket
 
 A high-performance, real-time cryptocurrency price monitoring tool. This bot uses **Binance WebSockets** to track prices with millisecond latency and notifies you instantly via Telegram when your targets are hit.
 
