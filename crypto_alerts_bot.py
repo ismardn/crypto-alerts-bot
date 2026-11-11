@@ -1,6 +1,6 @@
 import asyncio
 import logging
-import sqlite3
+import aiosqlite
 import os
 import json
 import traceback
@@ -78,25 +78,15 @@ INBOX_MESSAGE_HEADER = "[Crypto Alerts Bot]\n\n"
 
 SUBSCRIPT_MAP = {str(digit): "₀₁₂₃₄₅₆₇₈₉"[digit] for digit in range(10)}
 
-SYNC_STEP_MINUTES = 5
+SYNC_STEP_MINUTES = 1
+AUTO_UPDATE_MINUTES_TEXT = "minute" if (SYNC_STEP_MINUTES == 1) else f"{SYNC_STEP_MINUTES} minutes"
 
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 message_dispatcher = Dispatcher()
 
-database_connection = sqlite3.connect(ALERTS_DATABASE_FILENAME)
-database_cursor = database_connection.cursor()
-database_cursor.execute(f"""
-    CREATE TABLE IF NOT EXISTS {DATABASE_NAME} (
-        {ALERT_ID_DATABASE_FIELD} INTEGER PRIMARY KEY AUTOINCREMENT,
-        {BASE_CURRENCY_DATABASE_FIELD} TEXT, 
-        {QUOTE_CURRENCY_DATABASE_FIELD} TEXT,
-        {ALERT_PRICE_DATABASE_FIELD} REAL,
-        {CREATED_AT_DATABASE_FIELD} TEXT
-    )
-""")
-database_connection.commit()
+database_connection = None
 
 dashboard_message_ids = {}
 last_known_prices = {}
@@ -126,11 +116,13 @@ def format_alert_price(price: float) -> str:
 
         return f"0.0{sub_zeros_number}{significant_digits}"
     
-    return f"{price:g}"  # Prices between 0.0001 and 0.(9) are displayed simply.
+    return f"{price:g}"  # Prices between 0.0001 and 0.(9) are displayed simply
 
 
 async def send_inbox_message(message: str, level="INFO"):
     try:
+        await asyncio.sleep(1.1)  # Ensures compliance with Telegram's limits if several alerts occur at the same time
+
         if level == "INFO":
             await bot.send_message(chat_id=LOG_CHANNEL_ID,
                                    text=f"{INBOX_MESSAGE_HEADER}{message}",
@@ -148,12 +140,12 @@ async def send_inbox_message(message: str, level="INFO"):
 
 
 async def refresh_dashboard(chat_id: int):
-    alerts_infos_query_result = database_cursor.execute(f"""
+    async with database_connection.execute(f"""
         SELECT {ALERT_ID_DATABASE_FIELD}, {BASE_CURRENCY_DATABASE_FIELD}, {QUOTE_CURRENCY_DATABASE_FIELD}, {ALERT_PRICE_DATABASE_FIELD}
         FROM {DATABASE_NAME}
         ORDER BY {BASE_CURRENCY_DATABASE_FIELD}
-    """)
-    all_alerts_infos = alerts_infos_query_result.fetchall()
+    """) as cursor:
+        all_alerts_infos = await cursor.fetchall()
 
     dashboard_layout = []
 
@@ -173,7 +165,7 @@ async def refresh_dashboard(chat_id: int):
 
     status_emoji = OFFLINE_EMOJI if is_websocket_dead else ONLINE_EMOJI
 
-    dashboard_full_title = f"{CLOCK_EMOJI}  Updated on  <code>{formatted_current_date}</code>  at  <code>{formatted_current_time}</code>\n{WEBSOCKET_STATUS_TEXT}{status_emoji}\n\n<i>Updates automatically every {SYNC_STEP_MINUTES} minutes</i>"
+    dashboard_full_title = f"{CLOCK_EMOJI}  Updated on  <code>{formatted_current_date}</code>  at  <code>{formatted_current_time}</code>\n{WEBSOCKET_STATUS_TEXT}{status_emoji}\n\n<i>Updates automatically every {AUTO_UPDATE_MINUTES_TEXT}</i>"
 
     is_dashboard_updated = False
     if chat_id in dashboard_message_ids:
@@ -186,6 +178,13 @@ async def refresh_dashboard(chat_id: int):
                 parse_mode="HTML"
             )
             is_dashboard_updated = True
+
+        except TelegramBadRequest as e:  # Concurrent manual and heartbeat refreshes can trigger "message is not modified", causing duplicate orphan dashboards
+            if "message is not modified" in str(e).lower():
+                is_dashboard_updated = True
+            else:
+                pass
+
         except Exception:
             pass
 
@@ -217,12 +216,13 @@ async def trigger_websocket_restart():
 
 
 async def load_pairs_metadata_from_database():
-    alerts_infos_query_result = database_cursor.execute(f"""
+    async with database_connection.execute(f"""
         SELECT {ALERT_ID_DATABASE_FIELD}, {BASE_CURRENCY_DATABASE_FIELD}, {QUOTE_CURRENCY_DATABASE_FIELD}, {ALERT_PRICE_DATABASE_FIELD}
         FROM {DATABASE_NAME}
-    """)
+    """) as cursor:
+        alerts_infos = await cursor.fetchall()
 
-    for alert_id, base_currency, quote_currency, alert_price in alerts_infos_query_result.fetchall():
+    for alert_id, base_currency, quote_currency, alert_price in alerts_infos:
         pair_name = f"{base_currency}{quote_currency}"
         
         if pair_name not in pairs_metadata:
@@ -264,9 +264,14 @@ async def run_websocket_listener():
                     is_websocket_dead = False
 
                     json_data = json.loads(pair_websocket_message)
-                    if "data" not in json_data: continue  # Binance can send messages that do not contain a "data" field
+                    if PRICE_DATA_KEY_DICT not in json_data:
+                        continue  # Binance can send messages that do not contain a "data" field
                     
                     price_data = json_data[PRICE_DATA_KEY_DICT]
+
+                    if PAIR_NAME_KEY_DICT not in price_data or ASK_PRICE_KEY_DICT not in price_data:
+                        continue  # Binance can send "data" payloads that do not contain pair or price fields
+
                     pair_name = price_data[PAIR_NAME_KEY_DICT]
                     current_ask_price = float(price_data[ASK_PRICE_KEY_DICT])
                     
@@ -302,11 +307,11 @@ async def run_websocket_listener():
                                                      "INFO")
                             
                             if alert_infos in specific_pair_alerts:  # Important to check again in case it has already been deleted manually
-                                database_cursor.execute(f"""
+                                await database_connection.execute(f"""
                                     DELETE FROM {DATABASE_NAME}
                                     WHERE {ALERT_ID_DATABASE_FIELD} = ?
                                 """, (alert_id,))
-                                database_connection.commit()
+                                await database_connection.commit()
 
                                 specific_pair_alerts.remove(alert_infos)
 
@@ -315,6 +320,10 @@ async def run_websocket_listener():
         
         except asyncio.CancelledError:  # Thrown when the websocket is intentionally restarted (e.g. if the added alert contains a new pair)
             break
+        
+        except websockets.exceptions.ConnectionClosed:  # "No close frame received or sent" error, that can happen from time to time and doesn’t need to be logged
+            is_websocket_dead = True
+            await asyncio.sleep(1)
 
         except Exception:
             is_websocket_dead = True
@@ -366,14 +375,13 @@ async def command_add(user_message: types.Message):
         
         float_alert_price = float(price_input)
 
-        database_cursor.execute(f"""
+        async with database_connection.execute(f"""
             INSERT INTO {DATABASE_NAME} 
             ({BASE_CURRENCY_DATABASE_FIELD}, {QUOTE_CURRENCY_DATABASE_FIELD}, {ALERT_PRICE_DATABASE_FIELD}, {CREATED_AT_DATABASE_FIELD}) 
             VALUES (?, ?, ?, ?)
-        """, (base_currency, quote_currency, float_alert_price, datetime.datetime.now().isoformat()))
-        database_connection.commit()
-        
-        new_alert_id = database_cursor.lastrowid  # Allows to immediately retrieve the ID that was just created by the last "INSERT" statement
+        """, (base_currency, quote_currency, float_alert_price, datetime.datetime.now().isoformat())) as cursor:
+            await database_connection.commit()
+            new_alert_id = cursor.lastrowid  # Allows to immediately retrieve the ID that was just created by the last "INSERT" statement
 
         await user_message.delete()
         await refresh_dashboard(user_message.chat.id)
@@ -395,19 +403,28 @@ async def command_add(user_message: types.Message):
         try:
             await user_message.delete()
             await bot_answer.delete()
-        except:
+        except Exception:
             pass
+
+
+@message_dispatcher.message(is_owner_filter)  # Intercept everything else
+async def catch_all_messages(user_message: types.Message):
+    try:
+        await user_message.delete()
+    except Exception:
+        pass
 
 
 @message_dispatcher.callback_query(F.data.startswith(ASK_ALERT_DELETION_PREFIX_CALLBACK), is_owner_filter)
 async def callback_ask_delete(callback: types.CallbackQuery):
     alert_id = int(callback.data.split(ALERT_CALLBACK_SEPARATOR)[ALERT_ID_INDEX])
-    alert_infos_query_result = database_cursor.execute(f"""
+    
+    async with database_connection.execute(f"""
         SELECT {BASE_CURRENCY_DATABASE_FIELD}, {QUOTE_CURRENCY_DATABASE_FIELD}, {ALERT_PRICE_DATABASE_FIELD}
         FROM {DATABASE_NAME}
         WHERE {ALERT_ID_DATABASE_FIELD} = ?
-    """, (alert_id,))
-    alert_infos = alert_infos_query_result.fetchone()
+    """, (alert_id,)) as cursor:
+        alert_infos = await cursor.fetchone()
     
     if not alert_infos:
         await callback.answer(ALERT_ALREADY_REMOVED_MESSAGE)
@@ -438,23 +455,23 @@ async def cancel_deletion_callback(callback: types.CallbackQuery):
 async def confirm_deletion_callback(callback: types.CallbackQuery):
     alert_id = int(callback.data.split(ALERT_CALLBACK_SEPARATOR)[ALERT_ID_INDEX])
     
-    pair_name_list_query_result = database_cursor.execute(f"""
+    async with database_connection.execute(f"""
         SELECT {BASE_CURRENCY_DATABASE_FIELD}, {QUOTE_CURRENCY_DATABASE_FIELD}
         FROM {DATABASE_NAME}
         WHERE {ALERT_ID_DATABASE_FIELD} = ?
-    """, (alert_id,))
-    pair_name_list = pair_name_list_query_result.fetchone()
+    """, (alert_id,)) as cursor:
+        pair_name_list = await cursor.fetchone()
 
     if not pair_name_list:
         await callback.answer(ALERT_ALREADY_REMOVED_MESSAGE)
         await refresh_dashboard(callback.message.chat.id)
         return
     
-    database_cursor.execute(f"""
+    await database_connection.execute(f"""
         DELETE FROM {DATABASE_NAME}
         WHERE {ALERT_ID_DATABASE_FIELD} = ?
     """, (alert_id,))
-    database_connection.commit()
+    await database_connection.commit()
     
     await callback.answer("Alert deleted.")
     
@@ -493,22 +510,38 @@ async def heartbeat_loop():
 async def main():
     print("=== Bot started ===")
     
-    await load_pairs_metadata_from_database()
-
-    await refresh_dashboard(MY_USER_ID)
-
-    global websocket_task
-    websocket_task = asyncio.create_task(run_websocket_listener())
+    global database_connection
+    database_connection = await aiosqlite.connect(ALERTS_DATABASE_FILENAME)
     
-    asyncio.create_task(heartbeat_loop())
+    await database_connection.execute(f"""
+        CREATE TABLE IF NOT EXISTS {DATABASE_NAME} (
+            {ALERT_ID_DATABASE_FIELD} INTEGER PRIMARY KEY AUTOINCREMENT,
+            {BASE_CURRENCY_DATABASE_FIELD} TEXT, 
+            {QUOTE_CURRENCY_DATABASE_FIELD} TEXT,
+            {ALERT_PRICE_DATABASE_FIELD} REAL,
+            {CREATED_AT_DATABASE_FIELD} TEXT
+        )
+    """)
+    await database_connection.commit()
+    
+    try:
+        await load_pairs_metadata_from_database()
 
-    await bot.delete_webhook(drop_pending_updates=True)
-    await message_dispatcher.start_polling(bot)
+        await refresh_dashboard(MY_USER_ID)
+
+        global websocket_task
+        websocket_task = asyncio.create_task(run_websocket_listener())
+        
+        heartbeat_task = asyncio.create_task(heartbeat_loop())
+
+        await bot.delete_webhook(drop_pending_updates=True)
+        await message_dispatcher.start_polling(bot)
+    finally:
+        await database_connection.close()
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-
     except KeyboardInterrupt:
-        database_connection.close()
+        pass
