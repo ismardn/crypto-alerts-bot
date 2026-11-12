@@ -5,6 +5,7 @@ import os
 import json
 import traceback
 import datetime
+from zoneinfo import ZoneInfo
 import websockets
 import dotenv
 
@@ -14,6 +15,8 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 
 dotenv.load_dotenv()
+
+PARIS_TZ = ZoneInfo("Europe/Paris")
 
 
 # ------------------------------- Environment variables ------------------------------- #
@@ -159,7 +162,7 @@ async def refresh_dashboard(chat_id: int):
 
     alerts_menu_interface = InlineKeyboardMarkup(inline_keyboard=dashboard_layout)
 
-    current_datetime = datetime.datetime.now()
+    current_datetime = datetime.datetime.now(PARIS_TZ)
     formatted_current_date = current_datetime.strftime("%d %b")
     formatted_current_time = current_datetime.strftime("%H:%M")
 
@@ -379,7 +382,7 @@ async def command_add(user_message: types.Message):
             INSERT INTO {DATABASE_NAME} 
             ({BASE_CURRENCY_DATABASE_FIELD}, {QUOTE_CURRENCY_DATABASE_FIELD}, {ALERT_PRICE_DATABASE_FIELD}, {CREATED_AT_DATABASE_FIELD}) 
             VALUES (?, ?, ?, ?)
-        """, (base_currency, quote_currency, float_alert_price, datetime.datetime.now().isoformat())) as cursor:
+        """, (base_currency, quote_currency, float_alert_price, datetime.datetime.now(PARIS_TZ).isoformat())) as cursor:
             await database_connection.commit()
             new_alert_id = cursor.lastrowid  # Allows to immediately retrieve the ID that was just created by the last "INSERT" statement
 
@@ -491,7 +494,7 @@ async def confirm_deletion_callback(callback: types.CallbackQuery):
 async def heartbeat_loop():
     while True:
         try:
-            current_time = datetime.datetime.now()
+            current_time = datetime.datetime.now(PARIS_TZ)
             minutes_to_next_step = SYNC_STEP_MINUTES - (current_time.minute % SYNC_STEP_MINUTES)
             seconds_to_sleep = (minutes_to_next_step * 60) - current_time.second - (current_time.microsecond / 1_000_000)
             
@@ -545,3 +548,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+        
