@@ -337,8 +337,22 @@ async def run_websocket_listener():
 
 @message_dispatcher.message(Command(START_BOT_COMMAND_NAME), is_owner_filter)
 async def command_start(user_message: types.Message):
-    await user_message.delete()
-    await refresh_dashboard(user_message.chat.id)
+    try:
+        await user_message.delete()
+    except Exception:
+        pass
+    
+    chat_id = user_message.chat.id
+    
+    if chat_id in dashboard_message_ids:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=dashboard_message_ids[chat_id])
+        except Exception:
+            pass
+        
+        del dashboard_message_ids[chat_id]
+        
+    await refresh_dashboard(chat_id)
 
 
 def is_pair_name_correct(pair_name: str) -> bool:
@@ -548,4 +562,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
-        
